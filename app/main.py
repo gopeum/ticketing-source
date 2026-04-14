@@ -1,13 +1,8 @@
 from fastapi import FastAPI
-from config import DB_WRITER_HOST, REDIS_HOST
+from app.config import get_db_config
 
 app = FastAPI()
 
-
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "db": DB_WRITER_HOST,
-        "redis": REDIS_HOST
-    }
+@app.get("/ssm-test")
+def ssm_test():
+    return get_db_config()

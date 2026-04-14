@@ -1,0 +1,93 @@
+name: Backend CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/**"
+      - "helm-charts/**"
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REGISTRY: 302174038725.dkr.ecr.ap-northeast-2.amazonaws.com
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        service: [event-svc, reserv-svc, worker-svc]
+
+    steps:
+      # 코드 가져오기
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # AWS 인증 (OIDC)
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::302174038725:role/github-actions-oidc-new
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ECR 로그인
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password \
+          | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+      # 태그 생성 (SHA + latest)
+      - name: Generate Tag
+        id: tag
+        run: |
+          echo "TAG=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      # Docker Build
+      - name: Build Image
+        run: |
+          IMAGE=$ECR_REGISTRY/ticketing/${{ matrix.service }}
+
+          docker build \
+             -t $IMAGE:${{ steps.tag.outputs.TAG }} \
+             -t $IMAGE:latest \
+             -f services/${{ matrix.service }}/Dockerfile \
+             .
+
+      # Trivy Scan
+      - name: Run Trivy Scan
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/ticketing/${{ matrix.service }}:${{ steps.tag.outputs.TAG }}
+          format: table
+          exit-code: 0
+          ignore-unfixed: true
+          severity: CRITICAL
+
+      # ECR Push
+      - name: Push Image
+        run: |
+          IMAGE=$ECR_REGISTRY/ticketing/${{ matrix.service }}
+          docker push $IMAGE:${{ steps.tag.outputs.TAG }}
+          docker push $IMAGE:latest
+
+      # Helm values.yaml 업데이트 (only 이미지 태그)
+      - name: Update Helm values
+        run: |
+          FILE=helm-charts/${{ matrix.service }}/values.yaml
+
+          sed -i "s/tag: .*/tag: ${{ steps.tag.outputs.TAG }}/" $FILE
+
+      # Git commit & push (ArgoCD 트리거)
+      - name: Commit & Push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+          git add helm-charts/
+          git commit -m "update ${{ matrix.service }} image tag -> ${{ steps.tag.outputs.TAG }}" || echo "No changes"
+          git push

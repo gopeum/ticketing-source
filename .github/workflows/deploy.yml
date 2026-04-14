@@ -1,0 +1,68 @@
+name: event-svc-ci-cd
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 코드 체크아웃
+      - name: Checkout app repo
+        uses: actions/checkout@v4
+
+      # 2. Git SHA 생성
+      - name: Set image tag
+        run: echo "TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      # 3. AWS 인증
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+
+      # 4. ECR 로그인
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password --region ap-northeast-2 \
+          | docker login --username AWS --password-stdin \
+          302174038725.dkr.ecr.ap-northeast-2.amazonaws.com
+
+      # 5. Docker build
+      - name: Build image
+        run: |
+          docker build -t event-svc:$TAG .
+          docker tag event-svc:$TAG ${{ secrets.ECR_REPOSITORY }}:$TAG
+
+      # 6. Push image
+      - name: Push image
+        run: |
+          docker push ${{ secrets.ECR_REPOSITORY }}:$TAG
+
+      # 7. deploy repo clone
+      - name: Clone deploy repo
+        run: |
+          git clone https://github.com/${{ secrets.DEPLOY_REPO }}.git deploy-repo
+
+      # 8. values.yaml 업데이트
+      - name: Update Helm values
+        run: |
+          cd deploy-repo
+
+          sed -i "s/tag:.*/tag: $TAG/" helm-charts/event-svc/values.yaml
+
+      # 9. commit & push deploy repo
+      - name: Commit deploy changes
+        run: |
+          cd deploy-repo
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add .
+          git commit -m "update image tag $TAG" || echo "no changes"
+          git push

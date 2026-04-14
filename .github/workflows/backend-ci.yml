@@ -19,6 +19,11 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
+    # 병렬 충돌 방지
+    concurrency:
+      group: deploy-${{ matrix.service }}
+      cancel-in-progress: true
+
     strategy:
       matrix:
         service: [event-svc, reserv-svc, worker-svc]
@@ -41,11 +46,10 @@ jobs:
           aws ecr get-login-password \
           | docker login --username AWS --password-stdin $ECR_REGISTRY
 
-      # 태그 생성 (SHA + latest)
+      # 태그 생성
       - name: Generate Tag
         id: tag
-        run: |
-          echo "TAG=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+        run: echo "TAG=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
 
       # Docker Build
       - name: Build Image
@@ -54,7 +58,6 @@ jobs:
 
           docker build \
              -t $IMAGE:${{ steps.tag.outputs.TAG }} \
-             -t $IMAGE:latest \
              -f services/${{ matrix.service }}/Dockerfile \
              .
 
@@ -73,21 +76,25 @@ jobs:
         run: |
           IMAGE=$ECR_REGISTRY/ticketing/${{ matrix.service }}
           docker push $IMAGE:${{ steps.tag.outputs.TAG }}
-          docker push $IMAGE:latest
 
-      # Helm values.yaml 업데이트 (only 이미지 태그)
+      # Helm values 업데이트 (안전 방식)
       - name: Update Helm values
         run: |
+          sudo apt-get update && sudo apt-get install -y yq
+
           FILE=helm-charts/${{ matrix.service }}/values.yaml
+          TAG=${{ steps.tag.outputs.TAG }}
 
-          sed -i "s/tag: .*/tag: ${{ steps.tag.outputs.TAG }}/" $FILE
+          yq e '.image.tag = strenv(TAG)' -i $FILE
 
-      # Git commit & push (ArgoCD 트리거)
+      # Commit & Push
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
 
           git add helm-charts/
-          git commit -m "update ${{ matrix.service }} image tag -> ${{ steps.tag.outputs.TAG }}" || echo "No changes"
+
+          git commit -m "chore(deploy): update ${{ matrix.service }} -> ${{ steps.tag.outputs.TAG }}" || echo "No changes"
+
           git push
